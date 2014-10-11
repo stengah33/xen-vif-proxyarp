@@ -1,0 +1,141 @@
+#!/bin/bash
+#============================================================================
+# ${XEN_SCRIPT_DIR}/vif-proxyarp
+#
+# Script for configuring a vif in proxy arp mode.
+# It is a mix of parts of vir-bridge and vir-route scripts.
+# The hotplugging system will call this script if it is specified either in
+# the device configuration given to Xend, or the default Xend configuration
+# in ${XEN_CONFIG_DIR}/xend-config.sxp.  If the script is specified in
+# neither of those places, then this script is the default.
+#
+# Usage:
+# vif-proxyarp (add|remove|online|offline)
+#
+# Environment vars:
+# vif         vif interface name (required).
+# XENBUS_PATH path to this device's details in the XenStore (required).
+#
+# Read from the store:
+# bridge  bridge to add the vif to (optional).  Defaults to searching for the
+#         bridge itself.
+# ip      list of IP networks for the vif, space-separated (optional).
+#
+# up:
+# Enslaves the vif interface to the bridge and adds iptables rules
+# for its ip addresses (if any).
+#
+# down:
+# Removes the vif interface from the bridge and removes the iptables
+# rules for its ip addresses (if any).
+#
+# Created by stengah33 <stengah33@gmail.com>
+#
+#============================================================================
+
+dir=$(dirname "$0")
+. "$dir/vif-common.sh"
+
+bridge=${bridge:-}
+bridge=$(xenstore_read_default "$XENBUS_PATH/bridge" "$bridge")
+
+if [ -z "$bridge" ]
+then
+  bridge=$(brctl show | awk 'NR==2{print$1}')
+
+  if [ -z "$bridge" ]
+  then
+     fatal "Could not find bridge, and none was specified"
+  fi
+else
+  #
+  # Old style bridge setup with netloop, used to have a bridge name
+  # of xenbrX, enslaving pethX and vif0.X, and then configuring
+  # eth0.
+  #
+  # New style bridge setup does not use netloop, so the bridge name
+  # is ethX and the physical device is enslaved pethX
+  #
+  # So if...
+  #
+  #   - User asks for xenbrX
+  #   - AND xenbrX doesn't exist
+  #   - AND there is a ethX device which is a bridge
+  #
+  # ..then we translate xenbrX to ethX
+  #
+  # This lets old config files work without modification
+  #
+  if [ ! -e "/sys/class/net/$bridge" ] && [ -z "${bridge##xenbr*}" ]
+  then
+     if [ -e "/sys/class/net/eth${bridge#xenbr}/bridge" ]
+     then
+        bridge="eth${bridge#xenbr}"
+     fi
+  fi
+fi
+
+RET=0
+ip link show dev $bridge 1>/dev/null 2>&1 || RET=1
+if [ "$RET" -eq 1 ]
+then
+    fatal "Could not find bridge device $bridge"
+fi
+
+ip=${ip:-}
+
+turn_on_ipv4_ip_forward_and_proxy_arp() {
+    sysctl net.ipv4.ip_forward=1 > /dev/null
+    sysctl net.ipv4.conf.all.proxy_arp=1 > /dev/null
+}
+
+case "$command" in
+    online|add)
+	turn_on_ipv4_ip_forward_and_proxy_arp
+        if declare -F setup_virtual_bridge_port > /dev/null; then
+            log debug "Use setup_virtual_bridge_port()"
+            setup_virtual_bridge_port "$dev"
+	else
+            log debug "Use setup_bridge_port()"
+	    setup_bridge_port "$vif"
+        fi
+        if declare -f set_mtu > /dev/null; then
+            log debug "Use set_mtu()"
+            set_mtu $bridge $dev
+	else
+            log debug "Use inline mtu setup"
+            mtu="`ip link show $bridge | awk '/mtu/ { print $5 }'`"
+            if [ -n "$mtu" ] && [ "$mtu" -gt 0 ]
+            then
+                ip link set $vif mtu $mtu || :
+            fi
+        fi
+        add_to_bridge "$bridge" "$dev"
+        log debug "Removing $vif from bridge $bridge"
+	brctl delif "$bridge" "$vif"
+	turn_on_ipv4_ip_forward_and_proxy_arp
+        ipcmd='add'
+        cmdprefix=''
+        ;;
+
+    offline)
+        ipcmd='del'
+        cmdprefix='do_without_error'
+        do_without_error brctl delif "$bridge" "$vif"
+        do_without_error ifconfig "$vif" down
+        ;;
+esac
+
+if [ "${ip}" ] ; then
+    # If we've been given a list of IP addresses, then add routes from dom0 to
+    # the guest using those addresses.
+    for addr in ${ip} ; do
+      ${cmdprefix} ip route ${ipcmd} ${addr} dev ${dev} #src ${main_ip}
+    done
+fi
+
+log debug "Successful vif-proxyarp $command for $dev, bridge $bridge,ip $ip."
+if [ "$type_if" = vif -a "$command" = "online" ]
+then
+  success
+fi

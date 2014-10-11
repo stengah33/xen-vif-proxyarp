@@ -1,0 +1,99 @@
+#! /usr/bin/env bash
+t="$(cd "$(dirname "$0")" && pwd -P)"
+
+d_dir="/etc/xen/scripts"
+
+b_dir="$t/backup"
+b_dir_b="$(basename "$b_dir")"
+
+p_dir="$t/pkg"
+p_dir_b="$(basename "$p_dir")"
+
+get_ubuntu_xen_ver() {
+  dpkg -l | grep xen-hypervisor	| awk '{print $3}'
+}
+
+get_xen_ver() {
+  get_ubuntu_xen_ver
+}
+
+install_ubuntu_deps() {
+	apt-get install -y git wget python-dev gettext bin86 bcc iasl uuid-dev libncurses5-dev pkg-config libglib2.0-dev libyajl-dev libpixman-1-dev bzip2 libaio-dev texinfo libc6-dev-i386 checkinstall make
+}
+
+install_deps() {
+	install_ubuntu_deps
+}
+
+case "$1" in
+	deps)
+		install_deps
+		;;
+	ver)
+		get_xen_ver
+		;;
+	find)
+		(find "$t" -name 'vif-proxyarp' -type f)
+		;;
+	raw_inst)
+		[ -e "$d_dir" ] || mkdir -p "$d_dir"
+		"$0" find | while read src; do
+			echo "Copying '$src' to '$d_dir/' ..."
+			cp "$src" "$d_dir/"
+		done
+		;;
+	raw_find)
+		[ -e "$d_dir" ] && find "$d_dir" -name 'vif-proxyarp' -print
+		;;
+	raw_del)
+		[ -e "$d_dir" ] && find "$d_dir" -name 'vif-proxyapr' -delete
+		;;
+	mk_make)
+		"$0" backup
+		echo "$(cat <<EOF
+install:
+	install -d $d_dir/
+	install vif-proxyarp $d_dir/
+EOF
+		)" > "$b_dir/Makefile"
+		;;
+	ch_inst)
+		"$0" mk_make
+		[ -e "$p_dir" ] || mkdir -p "$p_dir"
+		c="checkinstall -D -y --nodoc --pkgname xen-vif-proxyarp --pkgversion 1.0 --pkgrelease xen-$(get_xen_ver) --pakdir '$p_dir'" 
+		echo "$c"
+		(cd "$b_dir" && $c)
+		;;
+	p_clean)
+		[ -d "$p_dir" ] && find "$p_dir" -type f -delete && rm -r "$p_dir_b"
+		;;
+	backup)
+		[ -e "$b_dir" ] || mkdir -p "$b_dir"
+		"$0" find | while read src; do
+			echo "Copying '$src' to '$b_dir/' ..."
+			cp "$src" "$b_dir/"
+		done
+		;;
+	b_clean)
+		[ -d "$b_dir" ] && find "$b_dir" -type f -delete && rm -r "$b_dir_b"
+		;;
+	all)
+		"$0" ch_inst
+		"$0" b_clean
+		"$0" p_clean
+		;;
+	*)
+		echo "Usage: $0 <deps|ver|raw_inst|raw_find|raw_del|mk_make|ch_inst|backup|b_clean|p_clean|all>"
+		echo "          deps     - install dependencies"
+		echo "          ver	 - get xen version"
+		echo "          raw_inst - raw install (just copy to '$d_dir')"
+		echo "          raw_find - find pv-grub files in '$d_dir'"
+		echo "          raw_del  - raw uninstall (just remove from '$d_dir')"
+		echo "          mk_make  - Make Makefile" 
+		echo "          ch_inst  - Create package by checkinstall"
+		echo "          backup   - Backup source"
+		echo "          b_clean  - Clean backup"
+		echo "          p_clean  - Clean package dir"
+		echo "          all      - ch_inst, b_clean, p_clean"
+		;;
+esac
